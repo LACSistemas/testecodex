@@ -10,6 +10,7 @@ import time
 import os
 import re
 import json
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -49,11 +50,15 @@ class PJEDaycovalAutomationESCitacao:
         print(f"🔍 Search mode: Looking for 'Citação' in Expedientes")
     
     def setup_driver(self):
-        """Setup Chrome driver"""
+        """Setup Chrome driver with an automatic fallback for renderer crashes"""
+        # Keep a dedicated temporary profile per run to avoid profile corruption issues.
+        # This helps on environments where Chrome starts crashing with STATUS_ACCESS_VIOLATION.
+        temp_profile_dir = tempfile.mkdtemp(prefix="selenium_tjes_")
+
         chrome_options = Options()
         if self.headless:
-            chrome_options.add_argument("--headless")
-        
+            chrome_options.add_argument("--headless=new")
+
         # Chrome download preferences
         prefs = {
             "download.default_directory": os.getcwd(),
@@ -62,14 +67,14 @@ class PJEDaycovalAutomationESCitacao:
             "safebrowsing.enabled": True
         }
         chrome_options.add_experimental_option("prefs", prefs)
-        
+
         # Additional Chrome options for stability
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option('useAutomationExtension', False)
-        
+
         # Options to prevent window from popping up and stealing focus
         chrome_options.add_argument("--disable-popup-blocking")
         chrome_options.add_argument("--disable-default-apps")
@@ -79,16 +84,43 @@ class PJEDaycovalAutomationESCitacao:
         chrome_options.add_argument("--disable-backgrounding-occluded-windows")
         chrome_options.add_argument("--disable-features=TranslateUI")
         chrome_options.add_argument("--disable-component-extensions-with-background-pages")
-        
+
+        # Extra hardening for STATUS_ACCESS_VIOLATION / renderer instability
+        chrome_options.add_argument(f"--user-data-dir={temp_profile_dir}")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--disable-software-rasterizer")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-features=RendererCodeIntegrity")
+        chrome_options.add_argument("--no-zygote")
+        chrome_options.add_argument("--remote-debugging-pipe")
+
         print("🚀 Starting Chrome browser...")
-        self.driver = webdriver.Chrome(options=chrome_options)
+        try:
+            self.driver = webdriver.Chrome(options=chrome_options)
+        except WebDriverException as first_error:
+            print(f"⚠️ First Chrome start failed: {first_error}")
+            print("🔁 Retrying Chrome startup with conservative fallback flags...")
+            chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+            chrome_options.add_argument("--disable-features=UseSkiaRenderer")
+            self.driver = webdriver.Chrome(options=chrome_options)
+
         self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         self.wait = WebDriverWait(self.driver, 30)
         # Removed maximize_window() to prevent focus stealing
         
         # Store the original window handle
         self.original_window = self.driver.current_window_handle
-        
+
+        # Diagnostic output (helps identify browser/driver incompatibility)
+        try:
+            caps = self.driver.capabilities or {}
+            browser_version = caps.get("browserVersion", "unknown")
+            chrome_driver_version = (caps.get("chrome", {}) or {}).get("chromedriverVersion", "unknown")
+            print(f"🧩 Browser version: {browser_version}")
+            print(f"🧩 ChromeDriver version: {chrome_driver_version}")
+        except Exception as e:
+            print(f"⚠️ Could not collect driver diagnostics: {str(e)}")
+
         # Set page load timeout
         self.driver.set_page_load_timeout(60)
     
